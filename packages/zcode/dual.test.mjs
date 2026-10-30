@@ -324,6 +324,24 @@ const giftUnreachable = (when = () => true) => {
   }
 }
 
+// giftThrowing replaces fetch with one that throws error() on the gift's
+// messages alone — the reads answer as usual — and counts the tries, since
+// a request that throws never reaches the fetch fake that fills sent.
+const giftThrowing = (error) => {
+  const under = globalThis.fetch
+  const tries = { gift: 0, plan: 0 }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    if (url.origin === "https://zcode.z.ai" && url.pathname.endsWith("/messages")) {
+      tries.gift++
+      throw await error()
+    }
+    if (url.origin === "https://api.z.ai" && url.pathname.endsWith("/messages")) tries.plan++
+    return under(input, init)
+  }
+  return tries
+}
+
 test("a gift that cannot be asked at all is answered from the plan", async () => {
   planAndBalance()
   answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
@@ -342,12 +360,30 @@ test("a gift that cannot be asked at all is answered from the plan", async () =>
 
 test("an aborted gift request stays aborted", async () => {
   planAndBalance()
-  giftUnreachable()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = ok({ type: "message", content: [] })
   const ctl = new AbortController()
   ctl.abort()
+  const tries = await giftThrowing(() => new DOMException("This operation was aborted", "AbortError"))
   const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
   await expect(opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash"), signal: ctl.signal })).rejects.toThrow()
-  expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(0)
+  expect(tries.gift).toBe(1)
+  expect(tries.plan).toBe(0)
+})
+
+test("an abort while the gift is in flight stays an abort", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const ctl = new AbortController()
+  // the abort lands while the ask is away: some runtimes surface it as a
+  // plain TypeError, and the signal says the caller meant it
+  const tries = await giftThrowing(() => {
+    ctl.abort()
+    return new TypeError("fetch failed")
+  })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  await expect(opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash"), signal: ctl.signal })).rejects.toThrow()
+  expect(tries.gift).toBe(1)
+  expect(tries.plan).toBe(0)
 })
 
 for (const [name, paid, gift] of [
