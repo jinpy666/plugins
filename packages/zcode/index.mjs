@@ -1731,6 +1731,28 @@ function busyAnswer(res, text) {
   })
 }
 
+// askBusy asks once and, when the answer is the vendor's in-flight cap
+// (3008/3009, or its own words), asks again through BUSY_WAITS's waits, a
+// quarter of a second and longer — about ten seconds of them. Past that the
+// account is saturated rather than busy, and the cap goes back as
+// busyAnswer's 429. The plan path's patience, shared with free first's
+// replay, whose plan has a cap of its own.
+async function askBusy(u, o, hs) {
+  let res = await fetch(u, { ...o, headers: hs })
+  for (let i = 0; res.status === 429; i++) {
+    const text = await res.text()
+    const cap = busy(429, text)
+    if (!cap || i >= BUSY_WAITS.length) {
+      res = cap ? busyAnswer(res, text) : new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
+      break
+    }
+    const w = BUSY_WAITS[i]
+    await sleep(Math.round(w * (0.75 + Math.random() * 0.5)))
+    res = await fetch(u, { ...o, headers: hs })
+  }
+  return res
+}
+
 function model(m, url) {
   const e = entry(m)
   return {
@@ -2290,15 +2312,20 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
             const askedUrl = url
             const place = workPlace(h)
             const sid = sessionOf(h.get("x-session-id"), s.device)
-            // replayOnPlan is free first's answer to a gift that refused
-            // what its own balance read had promised: the model as the
-            // agent sent it, the plan's headers, one ask. The model rests a
-            // minute (blocked) and the route is dropped, so the requests
-            // behind it re-read the balance and go straight to the plan.
-            const replayOnPlan = async () => {
+            // restModel is the gift saying this model has nothing left: the
+            // model rests a minute (blocked) and the route is dropped, so
+            // the requests behind it re-read the balance and go straight to
+            // the plan.
+            const restModel = () => {
               for (const [k, until] of blocked) if (Date.now() >= until) blocked.delete(k)
               blocked.set(s.key + "\0" + s.jwt + "\0" + asked.toLowerCase(), Date.now() + 60_000)
               routes.delete(s.key + "\0" + s.jwt)
+            }
+            // replayOnPlan is free first's answer to a gift that refused
+            // what its own balance read had promised: the model as the
+            // agent sent it, the plan's headers, the plan's own patience
+            // (askBusy).
+            const replayOnPlan = async () => {
               let u = askedUrl
               for (const b of [START_BASE, ZAI_BASE, BIGMODEL_BASE]) {
                 if (u.startsWith(b)) {
@@ -2315,7 +2342,7 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
               h2.delete("content-length")
               opts.body = marked(JSON.stringify({ ...JSON.parse(orig), model: asked }), s.device, sid)
               delete opts.duplex
-              return fetch(u, { ...opts, headers: h2 })
+              return askBusy(u, opts, h2)
             }
             if (start) {
               if (jwtExpired(s.jwt)) throw new Error(EXPIRED)
@@ -2354,21 +2381,7 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
             // magpie sends every agent's and every session's requests of this
             // computer through this one process, and its queue spaces them by
             // the number declared above
-            const ask = () => fetch(url, { ...opts, headers: h })
-            let res = await ask()
-            for (let i = 0; res.status === 429; i++) {
-              const text = await res.text()
-              const cap = busy(429, text)
-              if (!cap || i >= BUSY_WAITS.length) {
-                res = cap
-                  ? busyAnswer(res, text)
-                  : new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
-                break
-              }
-              const w = BUSY_WAITS[i]
-              await sleep(Math.round(w * (0.75 + Math.random() * 0.5)))
-              res = await ask()
-            }
+            let res = await askBusy(url, opts, h)
             // the Start Plan turning the request away says what to do about
             // it: the account blocked, or the network
             if (start && res.status >= 400) {
@@ -2377,7 +2390,10 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
                 // a key account sent to the Start Plan (its plan list read
                 // none) reads its plans again on the next request, so a
                 // coding plan that is there after all is used (#369)
-                if (freeGift) return done(kept(await replayOnPlan()))
+                if (freeGift) {
+                  restModel()
+                  return done(kept(await replayOnPlan()))
+                }
                 if (s.key && !forcedGift) routes.delete(s.key + "\0" + s.jwt)
                 return kept(startBlocked(res, text))
               }
@@ -2410,15 +2426,29 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
                 return spent && res.status < 400 ? kept(new Response(text, { status: 429, headers: res.headers })) : done(kept(res, text))
               }
             }
-            // free first's gift answer: the plugin made the choice, so a
-            // spent or refused gift is replayed on the plan (replayOnPlan)
-            // and anything else — its own busy cap among it — goes on as it
-            // came. A stream's body is never read here.
+            // free first's gift answer: the choice was the plugin's, so the
+            // plan answers what the gift would fail — a spent bucket and a
+            // refusal like any other 4xx or 5xx among them, the gift's own
+            // waited-out busy cap included, since the plan's cap is its own.
+            // A spent answer or a block page rests the model a minute and
+            // drops the route read; a 401/403 drops the read alone, so the
+            // next request learns whether the session is gone. Anything
+            // else — a 200 carrying the answer — goes on as it came. A
+            // stream's body is never read here.
             else if (start && freeGift) {
               const json = (res.headers.get("content-type") ?? "").includes("application/json")
               if (res.status >= 400 || json) {
                 const text = await res.text()
-                if (spentUp(text, res.status)) return done(kept(await replayOnPlan()))
+                const cap = busy(res.status, text)
+                const spent = !cap && spentUp(text, res.status)
+                if (spent) {
+                  restModel()
+                  return done(kept(await replayOnPlan()))
+                }
+                if (res.status >= 400) {
+                  if (!cap && (res.status === 401 || res.status === 403)) routes.delete(s.key + "\0" + s.jwt)
+                  return done(kept(await replayOnPlan()))
+                }
                 return done(kept(res, text))
               }
             }

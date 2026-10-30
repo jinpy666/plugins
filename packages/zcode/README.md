@@ -160,12 +160,14 @@ account, with no per-account naming to keep up.
 Two boundaries worth knowing. The gift is judged before the request is
 sent, from the balance read the plugin keeps for ten minutes: a gift
 that runs out between that read and the send has its refusal answered
-from the plan in the same request, and its rest — a minute, with the
-route's balance read dropped — sends the requests behind it straight to
-the plan, so the agent sees the plan's answer either way. And the
-`-Trial` entries keep their own strict semantics — asking one is still
-an explicit pick of the gift alone, never the plan; a spent one answers
-429 with freeFirst on, as it does without it.
+from the plan in the same request — any gift failure is, its own
+waited-out busy cap included, and the replay waits out the plan's busy
+cap as any plan request does — and a spent answer or a block page rests
+the model a minute and drops the route's balance read, so the requests
+behind it go straight to the plan. The agent sees the plan's answer
+either way. And the `-Trial` entries keep their own strict semantics —
+asking one is still an explicit pick of the gift alone, never the plan;
+a spent one answers 429 with freeFirst on, as it does without it.
 
 ## A few at once
 

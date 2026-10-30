@@ -250,6 +250,71 @@ test("a provider options object without freeFirst leaves the plugin's on", async
   expect(sent.at(-1).origin).toBe("https://zcode.z.ai")
 })
 
+const giftSaysSpent = () => new Response(JSON.stringify({ error: { message: "Insufficient balance or no resource package", code: 1113 } }), { status: 429, headers: { "content-type": "application/json" } })
+
+test("a replay waits out the plan's own busy cap", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = giftSaysSpent()
+  let planTries = 0
+  answers["/api/anthropic/v1/messages"] = () => {
+    planTries++
+    return planTries === 1
+      ? new Response(JSON.stringify({ error: { code: "3008", message: "concurrency limit exceeded" } }), { status: 429, headers: { "content-type": "application/json" } })
+      : ok({ type: "message", content: [] })
+  }
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(res.status).toBe(200)
+  expect(planTries).toBe(2)
+})
+
+test("a gift that fails for any other reason is answered from the plan too", async () => {
+  for (const [status, text] of [[500, "boom"], [401, "token expired or incorrect"], [400, "bad request"]]) {
+    planAndBalance()
+    _internal.blocked.clear()
+    sent.length = 0
+    answers["/api/v1/zcode-plan/anthropic/v1/messages"] = new Response(text, { status })
+    answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+    const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+    const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+    expect(res.status).toBe(200)
+    expect(sent.filter((c) => c.origin === "https://zcode.z.ai" && c.path.endsWith("/messages"))).toHaveLength(1)
+    expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(1)
+  }
+})
+
+test("the gift's own busy cap, waited out, is answered from the plan too", async () => {
+  planAndBalance()
+  const waits = _internal.BUSY_WAITS.splice(0)
+  _internal.BUSY_WAITS.push(1)
+  try {
+    answers["/api/v1/zcode-plan/anthropic/v1/messages"] = new Response(JSON.stringify({ code: "3008", msg: "user concurrency limit exceeded" }), { status: 429, headers: { "content-type": "application/json" } })
+    answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+    const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+    const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+    expect(res.status).toBe(200)
+    expect(sent.filter((c) => c.origin === "https://zcode.z.ai" && c.path.endsWith("/messages"))).toHaveLength(2)
+    expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(1)
+    // a cap is a turn not come, not spent: no minute's rest
+    expect(_internal.blocked.get(KEY + "\0" + jwt + "\0glm-5.3-flash")).toBeUndefined()
+  } finally {
+    _internal.BUSY_WAITS.length = 0
+    _internal.BUSY_WAITS.push(...waits)
+  }
+})
+
+test("a Start Plan block page is answered from the plan too", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = new Response(JSON.stringify({ error: { message: "request has been blocked due to unusual activity", code: 3012 } }), { status: 405, headers: { "content-type": "application/json" } })
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(res.status).toBe(200)
+  expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(1)
+  // the block rests the model a minute, as a spent answer does
+  expect(_internal.blocked.get(KEY + "\0" + jwt + "\0glm-5.3-flash")).toBeGreaterThan(Date.now())
+})
+
 for (const [name, paid, gift] of [
   ["a full paid week leaves an available gift usable", 100, 25],
   ["a spent gift leaves the paid plan usable", 20, 100],
