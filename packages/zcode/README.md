@@ -164,7 +164,10 @@ from the plan in the same request — any gift failure is, its own
 waited-out busy cap included, and the replay waits out the plan's busy
 cap as any plan request does — and a spent answer or a block page rests
 the model a minute and drops the route's balance read, so the requests
-behind it go straight to the plan. The agent sees the plan's answer
+behind it go straight to the plan. A gift that cannot be asked at all —
+the network, the host — is answered from the plan the same way, the
+route read dropped for the next request, while a caller's own abort
+stays an abort. The agent sees the plan's answer
 either way. And the `-Trial` entries keep their own strict semantics —
 asking one is still an explicit pick of the gift alone, never the plan;
 a spent one answers 429 with freeFirst on, as it does without it.

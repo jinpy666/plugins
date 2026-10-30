@@ -2381,7 +2381,19 @@ export async function ZCodeAuthPlugin({ client }, options = {}) {
             // magpie sends every agent's and every session's requests of this
             // computer through this one process, and its queue spaces them by
             // the number declared above
-            let res = await askBusy(url, opts, h)
+            let res
+            try {
+              res = await askBusy(url, opts, h)
+            } catch (e) {
+              // free first moved the request onto the gift, so a gift that
+              // cannot be asked at all — the network, the host — is answered
+              // from the plan; the route read is dropped, so the next
+              // request learns whether the host is back. A caller's abort
+              // stays an abort.
+              if (!freeGift || opts.signal?.aborted || e?.name === "AbortError") throw e
+              routes.delete(s.key + "\0" + s.jwt)
+              res = await replayOnPlan()
+            }
             // the Start Plan turning the request away says what to do about
             // it: the account blocked, or the network
             if (start && res.status >= 400) {

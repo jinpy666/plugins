@@ -315,6 +315,41 @@ test("a Start Plan block page is answered from the plan too", async () => {
   expect(_internal.blocked.get(KEY + "\0" + jwt + "\0glm-5.3-flash")).toBeGreaterThan(Date.now())
 })
 
+const giftUnreachable = (when = () => true) => {
+  const under = globalThis.fetch
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    if (when(url)) throw new TypeError("fetch failed")
+    return under(input, init)
+  }
+}
+
+test("a gift that cannot be asked at all is answered from the plan", async () => {
+  planAndBalance()
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  giftUnreachable((url) => url.origin === "https://zcode.z.ai" && url.pathname.endsWith("/messages"))
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(res.status).toBe(200)
+  expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(1)
+  // the route is dropped, so the next request's balance read finds out
+  // whether the host is back
+  expect(_internal.routes.get(KEY + "\0" + jwt)).toBeUndefined()
+  const second = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(second.status).toBe(200)
+  expect(sent.filter((c) => c.path.endsWith("/billing/balance"))).toHaveLength(2)
+})
+
+test("an aborted gift request stays aborted", async () => {
+  planAndBalance()
+  giftUnreachable()
+  const ctl = new AbortController()
+  ctl.abort()
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  await expect(opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash"), signal: ctl.signal })).rejects.toThrow()
+  expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(0)
+})
+
 for (const [name, paid, gift] of [
   ["a full paid week leaves an available gift usable", 100, 25],
   ["a spent gift leaves the paid plan usable", 20, 100],
