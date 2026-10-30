@@ -147,20 +147,25 @@ earned. Turn it on for the whole plugin in magpie's Plugins › Options
 ```
 
 or on the provider alone, under `provider.zcode.options` in the config
-magpie hands its plugins; where both say something, the provider's word
-stands. An account with a coding plan and a gift spends the gift until
-it is spent, then the plan; a gift-only account already goes to the gift
-by its plain names, so the option changes nothing there. Across the
-accounts magpie rotates, each spends its own gift before its own plan —
-which is the point: free allowance is spent before subscribed quota, on
-every account, with no per-account naming to keep up.
+magpie hands its plugins — a key only `plugins.json`'s `config` carries,
+so the plugin's own options are the ones magpie's Plugins › Options
+edits. Where both say something, the provider's word stands. An account
+with a coding plan and a gift spends the gift until it is spent, then
+the plan; a gift-only account already goes to the gift by its plain
+names, so the option changes nothing there. Across the accounts magpie
+rotates, each spends its own gift before its own plan — which is the
+point: free allowance is spent before subscribed quota, on every
+account, with no per-account naming to keep up.
 
 Two boundaries worth knowing. The gift is judged before the request is
 sent, from the balance read the plugin keeps for ten minutes: a gift
-that runs out between that read and the send answers 429 once, rests
-the model a minute, and the requests after it go to the plan. And the
+that runs out between that read and the send has its refusal answered
+from the plan in the same request, and its rest — a minute, with the
+route's balance read dropped — sends the requests behind it straight to
+the plan, so the agent sees the plan's answer either way. And the
 `-Trial` entries keep their own strict semantics — asking one is still
-an explicit pick of the gift alone, never the plan.
+an explicit pick of the gift alone, never the plan; a spent one answers
+429 with freeFirst on, as it does without it.
 
 ## A few at once
 

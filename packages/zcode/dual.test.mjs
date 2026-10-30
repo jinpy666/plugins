@@ -137,6 +137,119 @@ test("without freeFirst the plain model goes to the coding plan as before", asyn
   expect(JSON.parse(sent.at(-1).body).model).toBe("GLM-5.3-Flash")
 })
 
+test("free first with no live gift reads the balance once and stays on the plan", async () => {
+  answers["/api/biz/subscription/list"] = ok([{ productName: "GLM Coding Pro", status: "VALID" }])
+  answers["/api/v1/zcode-plan/billing/balance"] = ok({ server_time: now, plans: [], balances: [] })
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  for (let i = 0; i < 3; i++) {
+    const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+    expect(res.status).toBe(200)
+    expect(sent.at(-1).origin).toBe("https://api.z.ai")
+  }
+  expect(sent.filter((c) => c.path.endsWith("/billing/balance"))).toHaveLength(1)
+})
+
+test("free first with a failed balance read stays on the plan", async () => {
+  answers["/api/biz/subscription/list"] = ok([{ productName: "GLM Coding Pro", status: "VALID" }])
+  answers["/api/v1/zcode-plan/billing/balance"] = new Response("", { status: 500 })
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  for (let i = 0; i < 3; i++) {
+    const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+    expect(res.status).toBe(200)
+    expect(sent.at(-1).origin).toBe("https://api.z.ai")
+  }
+  expect(sent.filter((c) => c.path.endsWith("/billing/balance"))).toHaveLength(1)
+})
+
+test("free first changes nothing for a gift-only account", async () => {
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const giftOnly = { type: "oauth", access: jwt, refresh: JSON.stringify({ site: "zai", jwt, device: DEVICE }) }
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => giftOnly, { id: "zcode" }))
+  const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(res.status).toBe(200)
+  expect(sent.filter((c) => c.path.endsWith("/billing/balance"))).toHaveLength(0)
+  const m = sent.at(-1)
+  expect(m.origin).toBe("https://zcode.z.ai")
+  expect(JSON.parse(m.body).model).toBe("GLM-5.3-Flash")
+})
+
+test("a gift that answers spent is answered from the plan in the same request", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = new Response(JSON.stringify({ error: { message: "Insufficient balance or no resource package", code: 1113 } }), { status: 429, headers: { "content-type": "application/json" } })
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(res.status).toBe(200)
+  const giftTries = sent.filter((c) => c.origin === "https://zcode.z.ai" && c.path.endsWith("/messages"))
+  expect(giftTries).toHaveLength(1)
+  expect(JSON.parse(giftTries[0].body).model).toBe("glm-5.3-flash")
+  const planTries = sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))
+  expect(planTries).toHaveLength(1)
+  expect(JSON.parse(planTries[0].body).model).toBe("GLM-5.3-Flash")
+  // the next request skips the spent gift and goes straight to the plan
+  await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(sent.filter((c) => c.origin === "https://zcode.z.ai" && c.path.endsWith("/messages"))).toHaveLength(1)
+})
+
+test("a gift 200 that says the quota is spent is answered from the plan too", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = new Response(JSON.stringify({ code: 1005, msg: "exceed quota limit" }), { headers: { "content-type": "application/json" } })
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(res.status).toBe(200)
+  expect(sent.filter((c) => c.origin === "https://zcode.z.ai" && c.path.endsWith("/messages"))).toHaveLength(1)
+  expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(1)
+})
+
+test("after the minute's rest the plan keeps serving, inside the route's ten", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = new Response(JSON.stringify({ error: { message: "Insufficient balance or no resource package", code: 1113 } }), { status: 429, headers: { "content-type": "application/json" } })
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  const first = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(first.status).toBe(200)
+  // the minute out, the balance still read live: the gift is tried once
+  // more and answered from the plan again, never a 429 of its own
+  _internal.blocked.set(KEY + "\0" + jwt + "\0glm-5.3-flash", Date.now() - 1)
+  const second = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(second.status).toBe(200)
+  expect(sent.filter((c) => c.origin === "https://zcode.z.ai" && c.path.endsWith("/messages"))).toHaveLength(2)
+  expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(2)
+})
+
+test("three requests racing a gift that just ran out all get the plan's answer", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = new Response(JSON.stringify({ error: { message: "Insufficient balance or no resource package", code: 1113 } }), { status: 429, headers: { "content-type": "application/json" } })
+  answers["/api/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  const send = () => opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  const rs = await Promise.all([send(), send(), send()])
+  expect(rs.map((r) => r.status)).toEqual([200, 200, 200])
+  expect(sent.filter((c) => c.origin === "https://zcode.z.ai" && c.path.endsWith("/messages"))).toHaveLength(3)
+  expect(sent.filter((c) => c.origin === "https://api.z.ai" && c.path.endsWith("/messages"))).toHaveLength(3)
+})
+
+test("a -Trial entry keeps its local 429 with freeFirst on", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/billing/balance"] = ok({ ...balance, balances: [{ ...balance.balances[0], remaining_units: 0, used_units: 1000 }] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode" }))
+  const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash-Trial") })
+  expect(res.status).toBe(429)
+  expect(sent.filter((c) => c.path.endsWith("/messages"))).toHaveLength(0)
+})
+
+test("a provider options object without freeFirst leaves the plugin's on", async () => {
+  planAndBalance()
+  answers["/api/v1/zcode-plan/anthropic/v1/messages"] = ok({ type: "message", content: [] })
+  const opts = await freePlugin({ freeFirst: true }).then((h) => h.loader(async () => coding, { id: "zcode", options: { freeFirst: undefined } }))
+  const res = await opts.fetch(MSG, { method: "POST", headers: { "content-type": "application/json" }, body: body("GLM-5.3-Flash") })
+  expect(res.status).toBe(200)
+  expect(sent.at(-1).origin).toBe("https://zcode.z.ai")
+})
+
 for (const [name, paid, gift] of [
   ["a full paid week leaves an available gift usable", 100, 25],
   ["a spent gift leaves the paid plan usable", 20, 100],
