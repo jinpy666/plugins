@@ -134,6 +134,34 @@ plan's own in-flight cap (3008/3009) does not: such a request is asked
 again instead (see [A few at once](#a-few-at-once)). A stream's body is
 never read or buffered on the way.
 
+**Free first.** Picking `-Trial` by hand keeps the choice the user's,
+but an agent that always asks the plain model never sees the gift.
+`freeFirst` turns the preference around: the plain model spends the
+account's own live gift first, and falls back to the coding plan when
+the gift cannot serve it — a bucket that is spent, a model the gift
+does not serve, no ZCode session, or the minute's rest a refusal just
+earned. Turn it on for the whole plugin in magpie's Plugins › Options
+
+```json
+{ "freeFirst": true }
+```
+
+or on the provider alone, under `provider.zcode.options` in the config
+magpie hands its plugins; where both say something, the provider's word
+stands. An account with a coding plan and a gift spends the gift until
+it is spent, then the plan; a gift-only account already goes to the gift
+by its plain names, so the option changes nothing there. Across the
+accounts magpie rotates, each spends its own gift before its own plan —
+which is the point: free allowance is spent before subscribed quota, on
+every account, with no per-account naming to keep up.
+
+Two boundaries worth knowing. The gift is judged before the request is
+sent, from the balance read the plugin keeps for ten minutes: a gift
+that runs out between that read and the send answers 429 once, rests
+the model a minute, and the requests after it go to the plan. And the
+`-Trial` entries keep their own strict semantics — asking one is still
+an explicit pick of the gift alone, never the plan.
+
 ## A few at once
 
 A plan serves one account a few requests at a time; past that, ZCode

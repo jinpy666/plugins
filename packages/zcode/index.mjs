@@ -2119,12 +2119,17 @@ function sessionOf(id, device) {
 
 // ---- the plugin ------------------------------------------------------------------
 
-export async function ZCodeAuthPlugin({ client }) {
+export async function ZCodeAuthPlugin({ client }, options = {}) {
   const log = (message) => {
     try {
       client?.app?.log?.({ body: { service: "zcode-auth", level: "error", message } })
     } catch {}
   }
+  // freeFirst reads the option from the provider config's options first,
+  // and from the plugin's own (magpie's Plugins › Options) when the
+  // provider says nothing.
+  const freeFirst = (providerOptions) =>
+    providerOptions && "freeFirst" in providerOptions ? providerOptions.freeFirst === true : options?.freeFirst === true
   const oauth = (site) => ({
     type: "oauth",
     label: `ZCode: ${SITES[site].name}${site === "bigmodel" ? " (智谱)" : ""} GLM Coding Plan`,
@@ -2255,6 +2260,22 @@ export async function ZCodeAuthPlugin({ client }) {
                 orig = opts.body = JSON.stringify({ ...JSON.parse(orig), model: raw })
                 m = raw
                 forcedGift = true
+              } else if (freeFirst(provider?.options) && s.jwt) {
+                // free first: the plain model spends the account's own live
+                // gift before it spends the coding plan, under the model's
+                // own name as the gift lists it. A refusal at pre-check (a
+                // spent bucket, a model the gift does not serve, a minute's
+                // block after a refusal) leaves the request on the plan; one
+                // the pre-check passed but the send refused says 429 once
+                // and rests the model a minute (blocked below), so the next
+                // requests go to the plan.
+                gift ??= known ?? (await startPlan(s.jwt, s.device).catch(() => null))
+                const raw = giftServes(gift, m) ? giftNames(gift).find((x) => x.toLowerCase() === m.toLowerCase()) : ""
+                if (raw && giftUsable(s, gift, raw)) {
+                  orig = opts.body = JSON.stringify({ ...JSON.parse(orig), model: raw })
+                  m = raw
+                  forcedGift = true
+                }
               }
               start = alone || forcedGift
             }
